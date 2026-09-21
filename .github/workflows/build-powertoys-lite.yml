@@ -1,0 +1,848 @@
+# 追踪 microsoft/PowerToys 的上游版本，自动构建只含 5 个工具的精简安装包：
+#   Screen Ruler（屏幕标尺）/ Peek（速览）/ Color Picker（颜色选取器）
+#   File Locksmith / PowerRename
+#
+# 触发方式：
+#   schedule           —— 每周一检查上游是否发布新版本，有新版本才构建
+#   workflow_dispatch  —— 手动指定上游 ref / 版本号，或强制重建
+#   push（main 分支）  —— 改动 lite/ 或本工作流时，验证精简补丁依然可用
+#
+# 产出（x64、只出每用户安装包）：
+#   PowerToysUserSetup-<ver>-x64.exe  —— 每用户安装，装到 %LOCALAPPDATA%\PowerToys，无需管理员权限
+#   PowerToysUserSetup-<ver>-x64.msi  —— 同上，MSI 形式
+#   SHA256SUMS.txt                    —— 校验值
+# 并在本仓库发布 Release（标签 lite-v<ver>）。
+
+name: Build PowerToys Lite
+
+on:
+  schedule:
+    # 每周一 UTC 20:17 检查一次上游新版本（避开整点高峰）。
+    - cron: '17 20 * * 1'
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: '上游 ref（tag / branch / commit）。留空 = 自动取最新 Release'
+        required: false
+        default: ''
+      version_override:
+        description: '覆盖版本号（形如 0.95.1）。留空 = 自动推断'
+        required: false
+        default: ''
+      force:
+        description: '即使该版本已发布过也重新构建'
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'lite/**'
+      - '.github/workflows/build-powertoys-lite.yml'
+
+# 需要写权限创建 Release；读取上游公开仓库无需额外权限。
+permissions:
+  contents: write
+
+# 同一时间只跑一个构建，避免两个版本互相覆盖 Release。
+concurrency:
+  group: powertoys-lite
+  cancel-in-progress: false
+
+env:
+  CONFIGURATION: Release
+  # 目前只构建 x64。要加 arm64 的话：这里改成 ARM64，并把下面
+  # “Collect artifacts” 与 “Upload artifacts” 两处 YAML 里的 x64 一并改掉。
+  PLATFORM: x64
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 解析上游版本，决定是否需要构建
+  # ---------------------------------------------------------------------------
+  resolve:
+    name: Resolve upstream release
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+      ref: ${{ steps.decide.outputs.ref }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - name: Resolve upstream ref and version
+        id: decide
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_REF: ${{ inputs.upstream_ref }}
+          INPUT_VERSION: ${{ inputs.version_override }}
+          INPUT_FORCE: ${{ inputs.force }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $upstream = 'microsoft/PowerToys'
+
+          # ---- 上游 ref 与版本 ----
+          $ref = $env:INPUT_REF
+          $version = $env:INPUT_VERSION
+
+          if ([string]::IsNullOrWhiteSpace($ref)) {
+            Write-Host "查询 $upstream 的最新 Release ..."
+            $latest = (gh api "repos/$upstream/releases/latest" --jq '.tag_name' 2>$null)
+            if ($LASTEXITCODE -ne 0) { $latest = '' }
+
+            if ([string]::IsNullOrWhiteSpace($latest)) {
+              Write-Host '没有可用 Release，退回扫描 tag 取最高版本 ...'
+              $lines = git ls-remote --tags --refs "https://github.com/$upstream.git"
+              $candidates = @()
+              foreach ($line in $lines) {
+                if ($line -match '\s+refs/tags/v?(\d+\.\d+\.\d+)$') {
+                  $candidates += [pscustomobject]@{
+                    Ref     = ($Matches[0].Trim() -split '\s+')[-1]
+                    Version = [version]$Matches[1]
+                  }
+                }
+              }
+              if ($candidates.Count -gt 0) {
+                $latest = ($candidates | Sort-Object Version -Descending | Select-Object -First 1).Ref
+              }
+            }
+
+            if ([string]::IsNullOrWhiteSpace($latest)) {
+              Write-Host '::warning::无法解析上游版本，退回到 main 分支；本次不会发布 Release。'
+              $ref = 'main'
+            } else {
+              $ref = $latest
+              if ([string]::IsNullOrWhiteSpace($version)) { $version = $latest -replace '^refs/tags/', '' -replace '^v', '' }
+            }
+          }
+
+          # 手动指定 ref 时，ref 本身就是版本号就直接用它
+          if ([string]::IsNullOrWhiteSpace($version) -and $ref -match '^v?(\d+\.\d+\.\d+)$') {
+            $version = $Matches[1]
+          }
+
+          # ---- 是否已经构建发布过 ----
+          $shouldBuild = 'true'
+          $force = ($env:INPUT_FORCE -eq 'true') -or ($env:EVENT_NAME -eq 'push')
+
+          if (-not $force -and -not [string]::IsNullOrWhiteSpace($version)) {
+            gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/lite-v$version" 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "lite-v$version 已经发布过，跳过构建。"
+              $shouldBuild = 'false'
+            }
+          }
+          if ($force) { Write-Host '已开启强制构建。' }
+
+          Write-Host "ref=$ref  version=$version  should_build=$shouldBuild"
+          "ref=$ref"                  | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version"          | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "should_build=$shouldBuild" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  # ---------------------------------------------------------------------------
+  # 2. 构建精简版（x64 / 每用户安装包）
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build x64 user-scope installer
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    # 需要带 C++ 工具集的 Windows 构建机。若 windows-latest 不满足要求
+    # （见下方 “Setup Visual Studio” 步骤的版本检查），把仓库变量
+    # POWERTOYS_LITE_RUNNER 设为自建 runner 的标签即可。
+    runs-on: ${{ vars.POWERTOYS_LITE_RUNNER || 'windows-latest' }}
+    timeout-minutes: 300
+
+    steps:
+      # windows-latest 的 C: 盘装不下 PowerToys 的完整构建产物，先清掉用不到的 SDK。
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          $targets = @(
+            "$env:ProgramFiles\Android",
+            "$env:ProgramFiles\Google\Chrome",
+            "$env:ProgramFiles\Java",
+            "${env:ProgramFiles(x86)}\Android",
+            'C:\hostedtoolcache\windows\Java',
+            'C:\hostedtoolcache\windows\Ruby',
+            'C:\Android'
+          )
+          foreach ($t in $targets) { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue }
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, @{ n = 'FreeGB'; e = { [math]::Round($_.Free / 1GB, 1) } }
+
+      - name: Checkout overlay (this repository)
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Checkout upstream PowerToys
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/PowerToys
+          ref: ${{ needs.resolve.outputs.ref }}
+          path: upstream
+          fetch-depth: 1
+          submodules: false
+
+      - name: Apply lite patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $overlayRoot  = Join-Path $env:GITHUB_WORKSPACE 'overlay'
+          $upstreamRoot = Join-Path $env:GITHUB_WORKSPACE 'upstream'
+          $version = '${{ needs.resolve.outputs.version }}'
+
+          # 要打包哪些工具，只改 overlay/lite/enabled-tools.txt；tools.catalog.json 是数据文件，一般不用动。
+          $patchArgs = @{
+            RepoRoot      = $upstreamRoot
+            CatalogPath   = Join-Path $overlayRoot 'lite/tools.catalog.json'
+            SelectionPath = Join-Path $overlayRoot 'lite/enabled-tools.txt'
+          }
+          if (-not [string]::IsNullOrWhiteSpace($version)) { $patchArgs.Version = $version }
+          & (Join-Path $overlayRoot 'lite/apply-lite-patch.ps1') @patchArgs
+
+          "PT_LITE_ROOT=$upstreamRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PT_LITE_OVERLAY=$overlayRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PT_LITE_MANIFEST=$(Join-Path $overlayRoot 'lite/lite.build.json')" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Setup Visual Studio developer environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw 'vswhere 不存在：这个 runner 没有安装 Visual Studio。' }
+
+          $vsPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if ([string]::IsNullOrWhiteSpace($vsPath)) {
+            throw '找不到带 C++ 工具集的 Visual Studio，需要 .vsconfig 里列出的组件（NativeDesktop / ManagedDesktop / Universal / Win11 SDK / vcpkg）。'
+          }
+
+          $vsVersion = & $vswhere -latest -products * -property installationVersion
+          Write-Host "Visual Studio: $vsPath ($vsVersion)"
+          if ([version]$vsVersion -lt [version]'17.10') {
+            throw "需要 Visual Studio 17.10 或更高版本（当前 $vsVersion）。"
+          }
+          if ([version]$vsVersion -lt [version]'18.0') {
+            Write-Host '::warning::未检测到 Visual Studio 18.x，将使用 v143 工具集构建（上游默认 v145）。'
+          }
+
+          # 逐个确认 .vsconfig 里必需的组件。缺任何一个都会让「所有」项目失败，
+          # 所以在动手构建之前先把原因说清楚，而不是等 27 个项目各失败一次。
+          $requiredComponents = @(
+            'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+            'Microsoft.VisualStudio.Component.Windows11SDK.26100'
+          )
+          foreach ($component in $requiredComponents) {
+            $found = & $vswhere -latest -products * -requires $component -property installationPath
+            if ([string]::IsNullOrWhiteSpace($found)) {
+              throw "Visual Studio 缺少必需组件：$component —— 请按 .vsconfig 安装它（Windows 11 SDK 10.0.26100 是所有 .vcxproj 的硬性要求）。"
+            }
+            Write-Host "  [ok] $component"
+          }
+
+          # 上游 Cpp.Build.props 把 WindowsTargetPlatformVersion 硬编码成 10.0.26100.0，
+          # 而这个 SDK 不一定会随 VS 组件一起落盘，所以再直接确认一次。
+          $sdkInclude = 'C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0'
+          if (-not (Test-Path -LiteralPath $sdkInclude)) {
+            $installed = @(Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Directory -ErrorAction SilentlyContinue |
+                           ForEach-Object { $_.Name }) -join ', '
+            throw "缺少 Windows SDK 10.0.26100.0（上游 Cpp.Build.props 硬编码要求它）。当前已安装：$installed"
+          }
+          Write-Host '  [ok] Windows SDK 10.0.26100.0'
+
+          # 把 VsDevCmd 的环境变量（INCLUDE / LIB / PATH ...）导出给后续步骤
+          $devCmd = Join-Path $vsPath 'Common7\Tools\VsDevCmd.bat'
+          $envLines = cmd /c "`"$devCmd`" -arch=amd64 -host_arch=amd64 -winsdk=10.0.26100.0 && set"
+          foreach ($line in $envLines) {
+            if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
+              "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+          "VS_INSTALL_PATH=$vsPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Setup .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            6.0.x
+            8.0.x
+            10.0.x
+
+      - name: Install WiX 5 toolset
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet tool install --global wix --version 5.0.2
+          $toolsDir = Join-Path $env:USERPROFILE '.dotnet\tools'
+          $env:PATH = "$toolsDir;$env:PATH"
+          "PATH=$toolsDir;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          wix --version
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 与 .pipelines/v2/templates/steps-install-vcpkg.yml 一致：
+          # 优先用 VS 自带的 vcpkg，没有就在 deps/vcpkg 现场克隆一份。
+          Push-Location $env:PT_LITE_ROOT
+          try {
+            $vsVcpkg = Join-Path $env:VS_INSTALL_PATH 'VC\vcpkg'
+            if (Test-Path (Join-Path $vsVcpkg 'vcpkg.exe')) {
+              $vcpkgRoot = $vsVcpkg
+              Write-Host "使用 VS 自带的 vcpkg：$vcpkgRoot"
+            } else {
+              Write-Host 'VS 未自带 vcpkg，克隆 microsoft/vcpkg ...'
+              Remove-Item -Recurse -Force deps/vcpkg -ErrorAction SilentlyContinue
+              git clone --depth 1 https://github.com/microsoft/vcpkg deps/vcpkg
+              & ./deps/vcpkg/bootstrap-vcpkg.bat -disableMetrics
+              $vcpkgRoot = Join-Path $env:PT_LITE_ROOT 'deps/vcpkg'
+            }
+            "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } finally {
+            Pop-Location
+          }
+
+      # 上游的 packages.config 是「按项目声明、统一还原到仓库根 packages\」的：
+      # 例如 src/common/logger/packages.config 声明 CppWinRT，而 logger.vcxproj 用
+      #   $(RepoRoot)packages\Microsoft.Windows.CppWinRT.2.0.250303.1\build\native\...
+      # 去引用它。所以只还原根目录那一个 packages.config 是不够的——它里面只有
+      # Microsoft.MSBuildCache.*，CppWinRT / WIL 都在各项目自己的 packages.config 里。
+      #
+      # 实测（上游 main）：92 个 packages.config 按内容去重后是 17 份，而本次要构建的东西
+      # 实际只依赖 4 个包目录：CppWinRT / ImplementationLibrary(WIL) / boost / boost_regex。
+      # 上游 tools/build/build-installer.ps1 会显式设置这个变量（未设置时默认 %USERPROFILE%\.nuget\packages），
+      # 注释原文是 “Set NUGET_PACKAGES environment variable if not set, to help wixproj find heat.exe”。
+      # MSBuild 会把环境变量暴露成同名属性，而：
+      #   PowerToysSetupCustomActionsVNext.vcxproj 用 $(NUGET_PACKAGES)\wixtoolset.wcautil\5.0.2\build\native\v14\$(Platform)
+      #   去找 wcautil.lib / dutil.lib（注意是全局缓存的 id\version 布局，不是 packages\ 的 Id.Version 布局）
+      # 该属性为空时库目录会退化成盘符根目录，链接报 LNK1181: cannot open input file 'wcautil.lib'。
+      - name: Configure NUGET_PACKAGES
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $globalPackages = Join-Path $env:USERPROFILE '.nuget\packages'
+          New-Item -ItemType Directory -Force -Path $globalPackages | Out-Null
+          "NUGET_PACKAGES=$globalPackages" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "NUGET_PACKAGES = $globalPackages"
+
+      - name: Restore packages.config dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $nuget = Join-Path $env:RUNNER_TEMP 'nuget.exe'
+          Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/v6.6.1/nuget.exe' -OutFile $nuget
+
+          $packagesDir = Join-Path $env:PT_LITE_ROOT 'packages'
+          New-Item -ItemType Directory -Force -Path $packagesDir | Out-Null
+
+          # 很多 packages.config 内容完全相同（都是同一个 CppWinRT），按内容去重后再还原，
+          # 免得对同一个包请求上百次。
+          $configs = @(Get-ChildItem -LiteralPath $env:PT_LITE_ROOT -Recurse -File -Filter 'packages.config' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq 'packages.config' -and $_.FullName -notmatch '\\packages\\|\\obj\\' })
+          $unique = @{}
+          foreach ($config in $configs) {
+            $key = (Get-FileHash -LiteralPath $config.FullName -Algorithm SHA256).Hash
+            if (-not $unique.ContainsKey($key)) { $unique[$key] = $config }
+          }
+          Write-Host "发现 $($configs.Count) 个 packages.config，去重后 $($unique.Count) 份不同的依赖声明。"
+
+          # 逐份还原。注意这里刻意「不」因为某一份失败就退出：
+          # 上游有微软内部专用的 packages.config（例如 .pipelines/packages.config 里的
+          # Microsoft.PowerToys.Telemetry），公共凭据取不到，会返回 401；而它们跟我们要构建的
+          # 东西毫无关系（上游 ADO 流水线靠 NuGetAuthenticate@1 才拿得到）。
+          # 真正该把关的是「本次要构建的项目引用了哪些包」——见下面的权威校验。
+          # 注意：$ErrorActionPreference = 'Stop' 时，`2>&1` 会把原生命令的 stderr 变成
+          # 终止性错误（PowerShell 7.3+ 还会让非零退出码直接抛出），那样「某一份还原失败」
+          # 会直接中断整段逻辑，容错就白写了。这里临时放宽，只按退出码判断。
+          $failedConfigs = New-Object System.Collections.Generic.List[string]
+          $index = 0
+          $previousEap = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          try {
+            Push-Location $env:PT_LITE_ROOT
+            try {
+              foreach ($config in $unique.Values) {
+                $index++
+                $relative = $config.FullName.Substring($env:PT_LITE_ROOT.Length + 1)
+                Write-Host "[$index/$($unique.Count)] nuget restore $relative"
+                $output = & $nuget restore $config.FullName -PackagesDirectory $packagesDir -NonInteractive -Verbosity quiet 2>&1
+                $exitCode = $LASTEXITCODE
+                if ($exitCode -ne 0) {
+                  $failedConfigs.Add($relative) | Out-Null
+                  ($output | Select-Object -Last 1) | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkYellow }
+                }
+              }
+            } finally {
+              Pop-Location
+            }
+          } finally {
+            $ErrorActionPreference = $previousEap
+          }
+
+          if ($failedConfigs.Count -gt 0) {
+            Write-Host ''
+            Write-Host "有 $($failedConfigs.Count)/$($unique.Count) 份 packages.config 没能还原（通常是微软内部包）：" -ForegroundColor Yellow
+            $failedConfigs | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+            Write-Host '只要下面「工程实际引用的包」齐全，就不影响构建。' -ForegroundColor Yellow
+          }
+
+          # 权威校验：从「本次要构建的项目」里把 $(RepoRoot)packages\<包目录> 全部解析出来逐个确认。
+          # 这样上游升级包版本时这里不用跟着改，而缺包会在这里立刻报错，而不是等到 msbuild 里
+          # 冒出一句 "This project references NuGet package(s) that are missing"。
+          $manifest = Get-Content $env:PT_LITE_MANIFEST -Raw | ConvertFrom-Json
+          $needed = New-Object 'System.Collections.Generic.HashSet[string]'
+          foreach ($project in $manifest.buildProjects) {
+            $full = Join-Path $env:PT_LITE_ROOT $project
+            if (-not (Test-Path -LiteralPath $full)) { continue }
+            $text = [System.IO.File]::ReadAllText($full)
+            foreach ($match in [regex]::Matches($text, '\$\(RepoRoot\)packages\\([^\\"]+)')) {
+              $needed.Add($match.Groups[1].Value) | Out-Null
+            }
+          }
+
+          $missing = @($needed | Where-Object { -not (Test-Path (Join-Path $packagesDir $_)) })
+          if ($missing.Count -gt 0) {
+            Write-Host '工程引用了、但 packages 目录里不存在的包：' -ForegroundColor Red
+            $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+            throw 'NuGet 还原不完整，构建必定失败。'
+          }
+          Write-Host ''
+          Write-Host "packages 校验通过：工程引用的 $($needed.Count) 个包目录都存在。" -ForegroundColor Green
+
+      # 构建失败时最耗人的是「不知道哪个前置条件没满足」。vcpkg / Windows SDK / MSBuild SDK
+      # 解析这几项任何一个不满足，都会让「所有」项目一起失败，日志被 27 份重复错误淹掉。
+      # 所以这里把公共依赖逐个判定，缺什么就当场说清楚。
+      - name: Preflight diagnostics
+        shell: pwsh
+        run: |
+          $problems = New-Object System.Collections.Generic.List[string]
+
+          Write-Host '===== msbuild ====='
+          $msbuildCmd = Get-Command msbuild -ErrorAction SilentlyContinue
+          if ($msbuildCmd) {
+            Write-Host "  $($msbuildCmd.Source)"
+            & msbuild -version -nologo
+          } else {
+            Write-Host '  !! msbuild 不在 PATH 上'
+            $problems.Add('msbuild 不在 PATH 上（Visual Studio 环境变量没有导出成功）') | Out-Null
+          }
+
+          Write-Host '===== .NET SDKs ====='
+          dotnet --list-sdks
+
+          Write-Host '===== Windows SDK（上游 Cpp.Build.props 硬编码要求 10.0.26100.0）====='
+          $sdkInclude = 'C:\Program Files (x86)\Windows Kits\10\Include'
+          $sdkVersions = @()
+          if (Test-Path $sdkInclude) {
+            $sdkVersions = @(Get-ChildItem $sdkInclude -Directory | ForEach-Object { $_.Name })
+            $sdkVersions | ForEach-Object { "  $_" }
+          } else {
+            Write-Host "  !! 找不到 $sdkInclude"
+          }
+          if ($sdkVersions -notcontains '10.0.26100.0') {
+            $problems.Add("缺少 Windows SDK 10.0.26100.0 —— 上游 Cpp.Build.props 把它硬编码成 WindowsTargetPlatformVersion，所有 .vcxproj 都会失败。已装: $($sdkVersions -join ', ')") | Out-Null
+          }
+
+          Write-Host '===== vcpkg（Cpp.Build.props 的 PowerToysEnsureVcpkgAvailable 会为每个 .vcxproj 校验它）====='
+          Write-Host "  VCPKG_ROOT              = $env:VCPKG_ROOT"
+          $vcpkgOk = $false
+          if ($env:VCPKG_ROOT -and
+              (Test-Path (Join-Path $env:VCPKG_ROOT 'scripts\buildsystems\msbuild\vcpkg.props'))) {
+            $vcpkgOk = $true
+          }
+          $fallbackVcpkg = Join-Path $env:PT_LITE_ROOT 'deps\vcpkg'
+          if (Test-Path (Join-Path $fallbackVcpkg 'scripts\buildsystems\msbuild\vcpkg.props')) { $vcpkgOk = $true }
+          Write-Host "  可用                    = $vcpkgOk"
+          Write-Host "  上游 deps\vcpkg 回退路径 = $(Test-Path $fallbackVcpkg)"
+          if (-not $vcpkgOk) {
+            $problems.Add("找不到 vcpkg：$env:VCPKG_ROOT 与 deps\vcpkg 下都没有 scripts\buildsystems\msbuild\vcpkg.props。所有 .vcxproj 都会失败。") | Out-Null
+          }
+
+          Write-Host '===== NuGet 源（上游用 <clear/> 只留了 shine-oss 的 Azure DevOps feed）====='
+          $nuget = Join-Path $env:RUNNER_TEMP 'nuget.exe'
+          Push-Location $env:PT_LITE_ROOT
+          try {
+            if (Test-Path $nuget) { & $nuget sources list } else { Write-Host '  （nuget.exe 尚未下载）' }
+          } finally {
+            Pop-Location
+          }
+
+          Write-Host '===== MSBuild SDK 解析探测（RunVSTest / CopyOnWrite 需要能访问该 feed）====='
+          # 注意：此处不能用 here-string——它的结束符必须顶格，而 YAML 块标量里做不到。
+          $probeProject = Join-Path $env:RUNNER_TEMP 'sdk-probe.proj'
+          $probeXml = @(
+            '<Project>',
+            '  <Import Project="Sdk.props" Sdk="Microsoft.Build.CopyOnWrite" Version="1.0.282" />',
+            '  <Target Name="Probe" />',
+            '</Project>'
+          )
+          Set-Content -LiteralPath $probeProject -Encoding UTF8 -Value $probeXml
+          & msbuild $probeProject -t:Probe -nologo -verbosity:minimal
+          if ($LASTEXITCODE -ne 0) {
+            $problems.Add('MSBuild 无法解析 NuGet 形式的 SDK（Microsoft.Build.CopyOnWrite）—— 检查 nuget.config 里的 shine-oss feed 是否可达。否则所有项目都会在求值阶段失败。') | Out-Null
+          } else {
+            Write-Host '  [ok] NuGet SDK 解析正常'
+          }
+
+          Write-Host '===== NUGET_PACKAGES（Custom Actions 靠它定位 wcautil.lib / dutil.lib）====='
+          $globalPackages = $env:NUGET_PACKAGES
+          Write-Host "  NUGET_PACKAGES = $globalPackages"
+          if ([string]::IsNullOrWhiteSpace($globalPackages)) {
+            $problems.Add("NUGET_PACKAGES 为空：installer 工程里的 `$(NUGET_PACKAGES)\wixtoolset.wcautil\... 会退化成盘符根目录，链接时报 LNK1181: cannot open input file 'wcautil.lib'。") | Out-Null
+          } else {
+            # 和「工程实际引用的包」同样的思路：从 installer 下的工程里解析出
+            # $(NUGET_PACKAGES)\<id>\<version> 逐个确认，不硬编码包名。
+            # 这里扫的是已经打过补丁的源码：wixproj 的 PreBuildEvent 已被置空，
+            # 所以只会查到 CustomActions 真正还在用的 wcautil / dutil。
+            $neededGlobal = New-Object 'System.Collections.Generic.HashSet[string]'
+            $installerProjects = @(Get-ChildItem (Join-Path $env:PT_LITE_ROOT 'installer') -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Extension -in '.vcxproj', '.wixproj' -and $_.FullName -notmatch '\\obj\\' })
+            foreach ($installerProject in $installerProjects) {
+              $installerText = [System.IO.File]::ReadAllText($installerProject.FullName)
+              foreach ($globalMatch in [regex]::Matches($installerText, '\$\(NUGET_PACKAGES\)\\([^\\"$]+\\[^\\"$]+)')) {
+                $neededGlobal.Add($globalMatch.Groups[1].Value) | Out-Null
+              }
+            }
+            $missingGlobal = @($neededGlobal | Where-Object { -not (Test-Path (Join-Path $globalPackages $_)) })
+            if ($missingGlobal.Count -gt 0) {
+              $problems.Add("全局包缓存里缺少 installer 工程引用的目录：$([string]::Join(', ', $missingGlobal))") | Out-Null
+            } else {
+              Write-Host "  [ok] installer 工程引用的 $($neededGlobal.Count) 个包目录都存在"
+            }
+          }
+
+          Write-Host ''
+          if ($problems.Count -gt 0) {
+            Write-Host "预检发现 $($problems.Count) 个会导致「全部项目失败」的问题：" -ForegroundColor Red
+            foreach ($p in $problems) { Write-Host "  - $p" -ForegroundColor Red }
+            throw '构建前置条件不满足，已在预检阶段终止。'
+          }
+          Write-Host '预检通过。' -ForegroundColor Green
+
+      # 构建期辅助项目：它们不是 ProjectReference，而是在编译前被 <MSBuild Projects="..."> 任务临时调起。
+      # 例如 PowerToys.Settings.csproj 会在 CoreCompile 之前调起 Settings.UI.XamlIndexBuilder 生成
+      # 设置页的搜索索引。主项目的 -restore 不会顺带还原它们，所以缺 obj\project.assets.json 时会报
+      #   NETSDK1004: Assets file '...\obj\project.assets.json' not found.
+      # 清单由补丁脚本从待构建的项目里扫出来（不硬编码项目名，上游改名也能跟上）。
+      - name: Restore build-time helper projects
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content $env:PT_LITE_MANIFEST -Raw | ConvertFrom-Json
+          $helpers = @($manifest.restoreProjects)
+          if ($helpers.Count -eq 0) {
+            Write-Host '本次没有构建期辅助项目，跳过。'
+            return
+          }
+
+          foreach ($project in $helpers) {
+            $full = Join-Path $env:PT_LITE_ROOT $project
+            if (-not (Test-Path -LiteralPath $full)) { throw "清单里的辅助项目不存在：$project" }
+
+            # 不传 -p:Platform：这些都是 AnyCPU 项目，还原只按 TargetFramework 走。
+            Write-Host "`n===== restore $project ====="
+            & msbuild $full -t:Restore -nologo -verbosity:minimal `
+              "-p:Configuration=$env:CONFIGURATION" `
+              '-p:RestorePackagesConfig=true' `
+              '-p:SkipLongPathsCheck=true'
+            if ($LASTEXITCODE -ne 0) { throw "辅助项目还原失败（exit $LASTEXITCODE）：$project" }
+
+            # 这一步没成的表现是编译期才冒出来的 NETSDK1004，所以当场确认产物真的生成了。
+            # （仓库只在 installer\ 下给 WiX 项目改过 BaseIntermediateOutputPath，此处是默认的 obj\）
+            $assets = Join-Path (Split-Path -Parent $full) 'obj\project.assets.json'
+            if (-not (Test-Path -LiteralPath $assets)) {
+              throw "还原后仍然没有 $assets —— 后面构建 Settings 时必定失败。"
+            }
+            Write-Host "  [ok] $assets"
+          }
+
+      - name: Build lite projects
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content $env:PT_LITE_MANIFEST -Raw | ConvertFrom-Json
+          $platform = $env:PLATFORM
+
+          # 逐项目构建时 MSBuild 不会写 SolutionDir，而 VS 给 C++ 项目的默认 OutDir 正是
+          #   $(SolutionDir)$(Platform)\$(Configuration)\
+          # 少了它，C++ 产物会落到「各项目自己的」x64\Release\，而不是仓库根的 x64\Release\。
+          # 后果有两层：安装包报 WIX0103（找不到 PowerToys.exe / svgs\*.ico）；而更隐蔽的是
+          # BaseApplicationsFiles 扫描的就是仓库根那个目录，产物即使打出来也会缺一大批 C++ 二进制。
+          # 上游直接构建 PowerToys.slnx，SolutionDir 天然是仓库根；这里逐项目构建，只能显式补上。
+          # （.NET 项目不受影响：它们显式用 $(RepoRoot) 拼 OutputPath，发布则用 $(PowerToysRoot)。）
+          $solutionDir = $env:PT_LITE_ROOT + '\'
+
+          $commonArgs = @(
+            '-nologo', '-m', '-restore', '-verbosity:minimal',
+            "-p:Configuration=$env:CONFIGURATION",
+            "-p:Platform=$platform",
+            "-p:SolutionDir=$solutionDir",
+            '-p:CIBuild=true',
+            '-p:RestorePackagesConfig=true',
+            '-p:BuildTests=false',
+            # PowerToys 源码路径会超过 260 字符，runner 上没开长路径支持，跳过该前置检查
+            '-p:SkipLongPathsCheck=true'
+          )
+
+          $logDir = Join-Path $env:GITHUB_WORKSPACE 'build-logs'
+          New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+
+          # 逐个项目构建，并且「失败即停」：这些项目的公共依赖（vcpkg / Windows SDK /
+          # MSBuild SDK 解析）是全局的，第一个失败的项目就带着根因；继续跑完剩下 20 多个
+          # 只会把真正的错误淹在噪声里，还白烧十几分钟。
+          foreach ($project in $manifest.buildProjects) {
+            $full = Join-Path $env:PT_LITE_ROOT $project
+            if (-not (Test-Path -LiteralPath $full)) { throw "构建清单里的项目不存在：$project" }
+
+            $binlog = Join-Path $logDir (($project -replace '[\\/]', '_') + '.binlog')
+            Write-Host "`n===== msbuild $project ====="
+            Write-Host ("  msbuild {0} {1} /bl:{2}" -f $full, ($commonArgs -join ' '), $binlog)
+
+            & msbuild $full @commonArgs "/bl:$binlog"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host ''
+              Write-Host "!! 第一个构建失败的项目：$project" -ForegroundColor Red
+              Write-Host '!! 根因就在上面这段 msbuild 输出里；结构化日志（binlog）已作为 CI 产物上传。' -ForegroundColor Red
+              throw "msbuild 失败（exit $LASTEXITCODE）：$project"
+            }
+          }
+
+          # 自检：C++ 产物必须落在共享输出目录里（上面 SolutionDir 那段的原因）。
+          # 不在这里拦，问题会拖到装包阶段变成一堆 WIX0103，指向性差得多。
+          # 下面两处都来自 src/runner/runner.vcxproj：TargetName=PowerToys，以及复制到 $(OutDir)\svgs 的图标。
+          $sharedOut = Join-Path $env:PT_LITE_ROOT "$platform\$env:CONFIGURATION"
+          $probes = @(
+            @{ Name = 'PowerToys.exe'; Path = (Join-Path $sharedOut 'PowerToys.exe') },
+            @{ Name = 'svgs\icon.ico'; Path = (Join-Path $sharedOut 'svgs\icon.ico') }
+          )
+          $failedProbes = @($probes | Where-Object { -not (Test-Path -LiteralPath $_.Path) })
+          if ($failedProbes.Count -gt 0) {
+            Write-Host ''
+            Write-Host "共享输出目录 $sharedOut 里缺少：" -ForegroundColor Red
+            $failedProbes | ForEach-Object { Write-Host ("  - {0}" -f $_.Name) -ForegroundColor Red }
+            throw 'C++ 产物没落到共享输出目录 —— 检查 -p:SolutionDir 是否生效（装了包也一定会缺文件）。'
+          }
+          Write-Host "共享输出目录自检通过：$sharedOut"
+
+      - name: Publish self-contained WinUI 3 apps
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content $env:PT_LITE_MANIFEST -Raw | ConvertFrom-Json
+          $platform = $env:PLATFORM
+
+          # 与 .pipelines/v2/templates/job-build-project.yml 的 csProjectsToPublish 一致：
+          # 这些 WinUI 3 应用要以自包含方式 Publish，安装包才会带上完整的 .NET 运行时。
+          foreach ($project in $manifest.publishProjects) {
+            $full = Join-Path $env:PT_LITE_ROOT $project
+            Write-Host "`n===== publish $project ====="
+            & msbuild $full -nologo -m -target:Publish -graph `
+              "-p:Configuration=$env:CONFIGURATION" `
+              "-p:Platform=$platform" `
+              '-p:AppxBundle=Never' `
+              '-p:VCRTForwarders-IncludeDebugCRT=false' `
+              "-p:PowerToysRoot=$env:PT_LITE_ROOT" `
+              '-p:PublishProfile=InstallationPublishProfile.pubxml' `
+              '-p:TargetFramework=net10.0-windows10.0.26100.0' `
+              '-p:SkipLongPathsCheck=true' `
+              '-verbosity:minimal'
+            if ($LASTEXITCODE -ne 0) { throw "publish $project 失败（exit $LASTEXITCODE）" }
+          }
+
+      # 注意：这里刻意不定义 IsPipeline 环境变量。
+      # Resources.wxs 里 `<?ifdef env.IsPipeline?>` 分支依赖微软构建场的本地化资源
+      # （由内部 Touchdown 服务下发），定义了它会让安装包引用一堆不存在的 .resources.dll。
+      - name: Build WiX installer and bootstrapper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $platform = $env:PLATFORM
+          $solution = Join-Path $env:PT_LITE_ROOT 'installer\PowerToysSetup.slnx'
+
+          $base = @(
+            '-nologo', '-m', '-verbosity:minimal',
+            "-p:Configuration=$env:CONFIGURATION",
+            "-p:Platform=$platform",
+            '-p:CIBuild=true',
+            '-p:SkipLongPathsCheck=true'
+          )
+
+          # 诊断：CustomActions 的 PreBuildEvent 用
+          #   powershell.exe -NonInteractive -executionpolicy Unrestricted -File generateAllFileComponents.ps1
+          # 调脚本，宿主继承的是 VsDevCmd 之后的环境。实测该环境解析不到内置的 New-Guid
+          # （脚本里已加等价垫片）。这里用完全相同的调用方式复现一次，把宿主信息记进日志 ——
+          # 以后再遇到「同一行脚本本地能跑、runner 上不行」时有据可查。
+          # 写成临时脚本用 -File 调，避免内嵌引号在 pwsh -> powershell.exe 的原生参数传递里被吃掉。
+          $hostProbe = Join-Path $env:RUNNER_TEMP 'probe-child-powershell.ps1'
+          @(
+            "'PSVersion=' + `$PSVersionTable.PSVersion.ToString()",
+            "'New-Guid=' + [bool](Get-Command New-Guid -ErrorAction SilentlyContinue)",
+            "'PSModulePath=' + `$env:PSModulePath"
+          ) | Set-Content -LiteralPath $hostProbe -Encoding UTF8
+          Write-Host '----- 子 PowerShell 环境（PreBuildEvent 的宿主）-----'
+          & powershell.exe -NonInteractive -executionpolicy Unrestricted -File $hostProbe
+
+          Write-Host "`n===== 1/3 生成各 wxs 的文件清单（Custom Actions 预生成事件）====="
+          & msbuild $solution -restore -graph `
+            '-t:PowerToysSetupCustomActionsVNext;SilentFilesInUseBAFunction' @base `
+            '-p:RunBuildEvents=true' '-p:RestorePackagesConfig=true'
+          if ($LASTEXITCODE -ne 0) { throw '生成安装包文件清单失败' }
+
+          # 只出「每用户安装」包：无需管理员权限，安装到 %LOCALAPPDATA%\PowerToys。
+          # per-machine 包（-p:PerUser=false）刻意不构建，CI 时间与产物体积都能省一半。
+          Write-Host "`n===== 2/3 构建每用户 MSI ====="
+          & msbuild $solution '-t:PowerToysInstallerVNext' @base `
+            '-p:RunBuildEvents=false' '-p:PerUser=true' '-p:BuildProjectReferences=false'
+          if ($LASTEXITCODE -ne 0) { throw '构建每用户 MSI 失败' }
+
+          Write-Host "`n===== 3/3 构建每用户 Bootstrapper ====="
+          & msbuild $solution '-t:PowerToysBootstrapperVNext' @base `
+            '-p:PerUser=true' '-p:BuildProjectReferences=false'
+          if ($LASTEXITCODE -ne 0) { throw '构建每用户 Bootstrapper 失败' }
+
+          Write-Host "`n安装包产物："
+          # 不用 -Include：在「-LiteralPath + -Recurse」且路径不含通配符时它不会真正过滤。
+          Get-ChildItem (Join-Path $env:PT_LITE_ROOT 'installer\PowerToysSetupVNext') -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in '.exe', '.msi' -and $_.Name -match '^PowerToysUserSetup-' } |
+            ForEach-Object { Write-Host ("  {0}  ({1} MB)" -f $_.FullName, [math]::Round($_.Length / 1MB, 1)) }
+
+      # binlog 是排查 MSBuild 失败最有效的东西（可在 MSBuild Structured Log Viewer 里打开）。
+      # 只要前面任何一步挂了就上传，别让它随 runner 一起消失。
+      - name: Upload MSBuild binlogs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msbuild-logs-${{ github.run_id }}
+          path: build-logs
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Verify lite output
+        shell: pwsh
+        run: |
+          & (Join-Path $env:PT_LITE_OVERLAY 'lite/verify-lite-output.ps1') `
+            -RepoRoot $env:PT_LITE_ROOT `
+            -ManifestPath $env:PT_LITE_MANIFEST `
+            -Version '${{ needs.resolve.outputs.version }}' `
+            -Platform $env:PLATFORM
+
+      - name: Collect artifacts and hashes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'artifacts/x64'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $source = Join-Path $env:PT_LITE_ROOT 'installer\PowerToysSetupVNext'
+          # 不用 -Include：在「-LiteralPath + -Recurse」且路径不含通配符时它不会真正过滤。
+          $files = @(Get-ChildItem $source -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.FullName -notmatch '\\obj\\' -and
+                $_.Extension -in '.exe', '.msi' -and
+                $_.Name -match '^PowerToysUserSetup-'
+            })
+
+          if ($files.Count -eq 0) { throw '没有找到每用户安装包，构建流程可能没有真正产出。' }
+
+          $hashes = foreach ($f in $files) {
+            Copy-Item $f.FullName $stage -Force
+            "$((Get-FileHash $f.FullName -Algorithm SHA256).Hash)  $($f.Name)"
+          }
+          $hashes | Set-Content -LiteralPath (Join-Path $stage 'SHA256SUMS.txt') -Encoding ASCII
+
+          # 把构建清单一起带上：发布 Release 时用它生成准确的「包含哪些工具」表格
+          Copy-Item $env:PT_LITE_MANIFEST (Join-Path $stage 'lite.build.json') -Force
+
+          Get-ChildItem $stage | Select-Object Name, @{ n = 'MB'; e = { [math]::Round($_.Length / 1MB, 1) } }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PowerToysLite-x64-${{ needs.resolve.outputs.version }}
+          path: artifacts/x64
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 3. 发布 Release（解析出版本号时才执行）
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish release
+    needs: [resolve, build]
+    if: needs.resolve.outputs.should_build == 'true' && needs.resolve.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create or update release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # 这个 job 刻意不 checkout（只需要产物），于是没有 .git；而 gh 的 release 子命令
+          # 不像 `gh api repos/...` 那样自带仓库参数，它会退回去调 git 推断仓库，报：
+          #   failed to run git: fatal: not a git repository (or any of the parent directories): .git
+          # 显式给 GH_REPO 之后，本步骤里所有 gh 命令都不用再依赖 git 了。
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          UPSTREAM_REF: ${{ needs.resolve.outputs.ref }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "lite-v$env:VERSION"
+
+          Get-ChildItem -Recurse -File artifacts | Select-Object FullName, Length
+
+          gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>$null | Out-Null
+          $exists = ($LASTEXITCODE -eq 0)
+
+          if (-not $exists) {
+            # 工具清单直接取自构建清单，所以改 enabled-tools.txt 之后发布说明会自动跟着变
+            $manifestFile = Get-ChildItem -Recurse -File artifacts -Filter 'lite.build.json' -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            $toolRows = @()
+            if ($manifestFile) {
+              $buildManifest = Get-Content -LiteralPath $manifestFile.FullName -Raw | ConvertFrom-Json
+              foreach ($tool in $buildManifest.enabledTools) {
+                $toolRows += "| ``$($tool.id)`` | $($tool.displayName) |"
+              }
+            }
+            if ($toolRows.Count -eq 0) { $toolRows = @('| （本次没有启用任何工具） | — |') }
+
+            $lines = @(
+              "PowerToys Lite **v$env:VERSION** —— 精简构建，本次包含以下工具：",
+              '',
+              '| 工具 ID | 名称 |',
+              '| --- | --- |'
+            ) + $toolRows + @(
+              '',
+              "基于上游 microsoft/PowerToys ``$env:UPSTREAM_REF`` 构建，架构 x64。",
+              '',
+              '- `PowerToysUserSetup-*.exe` —— 每用户安装，装到 `%LOCALAPPDATA%\PowerToys`，**不需要管理员权限**',
+              '',
+              '说明：',
+              '',
+              '- 本构建**未做代码签名**，Windows SmartScreen 可能提示未知发布者；请先核对 `SHA256SUMS.txt`。',
+              '- 与官方 PowerToys 使用相同的产品标识，安装前请先卸载官方版本，不要并存。',
+              '- 不含本地化资源，界面为英文。'
+            )
+            $lines | Set-Content -LiteralPath release-notes.md -Encoding UTF8
+            gh release create $tag --title "PowerToys Lite $env:VERSION" --notes-file release-notes.md -R $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw '创建 Release 失败' }
+          } else {
+            Write-Host "Release $tag 已存在，直接覆盖其中的产物。"
+          }
+
+          $assets = @(Get-ChildItem -Recurse -File artifacts |
+            Where-Object { $_.Extension -in '.exe', '.msi', '.txt' })
+          if ($assets.Count -eq 0) { throw '没有可上传的产物。' }
+
+          foreach ($asset in $assets) {
+            gh release upload $tag $asset.FullName --clobber -R $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw "上传 $($asset.Name) 失败" }
+          }
+          Write-Host "已发布 $tag"

@@ -1,0 +1,54 @@
+# ============================================================================
+#  PowerToys Lite —— 需要打包的工具清单
+# ============================================================================
+#
+#  想改打包哪些工具，只改这个文件，别的都不用动：
+#    · 一行一个工具 ID
+#    · 行首加 # 就是「不打包」；去掉行首的 # 就是「打包」
+#    · 行尾 # 后面的内容是注释，可以随便写
+#    · 空行会被忽略
+#    · 全部注释掉 = 只打包 PowerToys 本体（一个工具都不带）
+#
+#  工具 ID 必须存在于同目录的 tools.catalog.json。填错了构建会立刻报错，
+#  并把所有可用的 ID 列出来，不会静默产出一个少了工具安装包。
+#
+#  下面默认启用 5 个工具；再往下的其它工具默认关闭，去掉行首的 # 即可启用。
+#  未实测过的工具会打印警告（可正常构建），开启后请留意 CI 的校验步骤。
+# ============================================================================
+
+# ---------- 默认打包的 5 个工具 ----------
+MeasureTool       # 屏幕标尺：屏幕像素测量
+peek              # 速览：空格键快速预览文件
+colorPicker       # 颜色选取器：屏幕取色
+FileLocksmith     # 查看文件被哪个进程占用
+powerrename       # 批量重命名
+
+# ---------- 以下默认不打包，去掉行首 # 即可启用 ----------
+
+# fancyzones           # 窗口布局管理
+# previewpane          # 文件资源管理器加载项（预览/缩略图）※ 需额外恢复 Monaco 资源抓取
+# imageresizer         # 图像大小调整器
+# keyboardmanager      # 键盘管理器（改键 / 快捷键）
+# launcher             # PowerToys Run 快速启动
+# ShortcutGuide        # 快捷键指南
+# awake                # 保持唤醒
+# MouseUtils           # 鼠标实用工具（6 个一组）
+# alwaysontop          # 窗口置顶
+# poweraccent          # 快速重音
+# 启用文本提取器是因为我安装了start all back后快捷键有冲突，否则此工具已经集成到了系统截图里，无需打包！
+ PowerOCR             # 文本提取器（屏幕 OCR）
+# AdvancedPaste        # 高级粘贴
+# registrypreview      # 注册表预览
+# NewPlus              # 新建菜单增强
+# Hosts                # Hosts 文件编辑器
+# EnvironmentVariables # 环境变量编辑器
+# MouseWithoutBorders  # 无界鼠标
+# CropAndLock          # 裁剪与锁定
+# cmdNotFound          # 命令未找到提示
+# Workspaces           # 工作区
+# cmdpal               # 命令面板 ※ 依赖上游单独打包的 MSIX
+# ZoomIt               # 屏幕缩放标注
+# LightSwitch          # 自动切换主题
+# powerdisplay         # 显示器控制
+# GrabAndMove          # 拖拽移动窗口
+# AltWindowCycle       # Alt+Tab 窗口切换增强

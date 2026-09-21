@@ -1,0 +1,10 @@
+# 这些脚本里含中文，必须保持“UTF-8 with BOM”：
+# Windows PowerShell 5.1 对没有 BOM 的 .ps1 会按系统 ANSI 代码页解码，中文会变乱码并引发语法错误。
+# 下面的规则只固定换行符，不会动 BOM 字节。
+*.ps1 text eol=crlf
+*.yml text eol=lf
+*.json text eol=lf
+
+# 二进制/生成的产物不参与文本规范化
+*.exe binary
+*.msi binary
