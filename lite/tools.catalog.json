@@ -1,0 +1,534 @@
+{
+  "$schema": "powertoys-lite-tools/1",
+  "$comment": [
+    "PowerToys Lite —— 工具目录（catalog）。",
+    "",
+    "这是「数据」文件，正常使用不需要改它。要选择打包哪些工具，请编辑同目录的 enabled-tools.txt。",
+    "",
+    "每个工具条目的字段含义：",
+    "  id               工具标识，enabled-tools.txt 里用的就是它。",
+    "  displayName      人类可读名称（用于日志与文档）。",
+    "  moduleDir        该工具在上游的源码目录（src/modules/...）。",
+    "                   构建项目由脚本在这里现扫（排除 test/fuzz/template/sample 等），",
+    "                   因此上游增删或改名项目文件都不需要改本文件。",
+    "  moduleDllNames   该工具的模块 DLL 文件名。脚本会在上游 runner 的 knownModules 里按文件名",
+    "                   查出现成的相对路径（上游可能把它挪到 WinUI3Apps/ 或改名），查不到就报错。",
+    "  publishProjects  需要以「自包含发布」方式 Publish 的项目（上游 csProjectsToPublish 的要求）。",
+    "                   这一项按完整路径写，因为上游只会保留极少数几个，且路径很稳定。",
+    "  installerWxs     该工具对应的安装包 .wxs 文件；留空表示其二进制由 BaseApplications /",
+    "                   WinUI3Applications 的整体目录抓取自动带上，无需专门声明。",
+    "  installerComponentGroups 上述 .wxs 里的 ComponentGroup Id。",
+    "  verified         是否已端到端验证过。false 只代表「没有实测过」，不代表一定不可用；",
+    "                   构建脚本会给出警告，真正的把关靠 verify-lite-output.ps1。",
+    "  note             该工具已知的额外注意事项。",
+    "",
+    "core.projects 是 PowerToys 本体的固定项目（runner / 设置界面等），5 条路径很稳定，故直接列出。",
+    "每次构建前，apply-lite-patch.ps1 都会用上游源码校验本文件：模块目录是否存在、publish 项目是否存在、",
+    "每个 wxs 与组件分组是否对得上、每个模块 DLL 名能否在 knownModules 里查到——对不上就立刻报错，",
+    "因此上游改结构时不会静默产出坏包。"
+  ],
+  "core": {
+    "displayName": "PowerToys 本体（运行器 + 设置界面 + 安装包骨架）",
+    "projects": [
+      "src/runner/runner.vcxproj",
+      "src/ActionRunner/ActionRunner.vcxproj",
+      "src/PackageIdentity/PackageIdentity.vcxproj",
+      "src/Update/PowerToys.Update.vcxproj",
+      "src/settings-ui/Settings.UI/PowerToys.Settings.csproj"
+    ],
+    "publishProjects": [
+      "src/settings-ui/Settings.UI/PowerToys.Settings.csproj"
+    ],
+    "installerWxs": [
+      "CustomDialogs\\PTInstallDirDlg.wxs",
+      "CustomDialogs\\PTLicenseDlg.wxs",
+      "CustomDialogs\\WixUI_PTInstallDir.wxs",
+      "Product.wxs",
+      "BaseApplications.wxs",
+      "Core.wxs",
+      "Settings.wxs",
+      "WinAppSDK.wxs",
+      "WinUI3Applications.wxs"
+    ],
+    "installerComponentGroups": [
+      "CoreComponents",
+      "BaseApplicationsComponentGroup",
+      "WinUI3ApplicationsComponentGroup",
+      "SettingsComponentGroup",
+      "WindowsAppSDKComponentGroup"
+    ]
+  },
+  "tools": [
+    {
+      "id": "fancyzones",
+      "displayName": "FancyZones（窗口布局）",
+      "moduleDllNames": [
+        "PowerToys.FancyZonesModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/fancyzones",
+      "publishProjects": [],
+      "installerWxs": [],
+      "installerComponentGroups": [],
+      "verified": false
+    },
+    {
+      "id": "previewpane",
+      "displayName": "File Explorer Add-ons（文件资源管理器加载项）",
+      "moduleDllNames": [
+        "PowerToys.powerpreview.dll"
+      ],
+      "moduleDir": "src/modules/previewpane",
+      "publishProjects": [
+        "src/modules/previewpane/MonacoPreviewHandler/MonacoPreviewHandler.csproj",
+        "src/modules/previewpane/MarkdownPreviewHandler/MarkdownPreviewHandler.csproj",
+        "src/modules/previewpane/SvgPreviewHandler/SvgPreviewHandler.csproj",
+        "src/modules/previewpane/SvgThumbnailProvider/SvgThumbnailProvider.csproj"
+      ],
+      "installerWxs": [
+        "FileExplorerPreview.wxs"
+      ],
+      "installerComponentGroups": [
+        "FileExplorerPreviewComponentGroup"
+      ],
+      "verified": false,
+      "note": "启用它还需要恢复被精简掉的 Monaco 资源抓取：Product.wxs 的 MonacoSRCHeatGenerated 分组、MonacoSRC.wxs、wixproj 里的 generateMonacoWxs.ps1 预生成事件。目前不支持开箱启用。"
+    },
+    {
+      "id": "imageresizer",
+      "displayName": "Image Resizer（图像大小调整器）",
+      "moduleDllNames": [
+        "PowerToys.ImageResizerExt.dll"
+      ],
+      "moduleDir": "src/modules/imageresizer",
+      "publishProjects": [],
+      "installerWxs": [
+        "ImageResizer.wxs"
+      ],
+      "installerComponentGroups": [
+        "ImageResizerComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "keyboardmanager",
+      "displayName": "Keyboard Manager（键盘管理器）",
+      "moduleDllNames": [
+        "PowerToys.KeyboardManager.dll"
+      ],
+      "moduleDir": "src/modules/keyboardmanager",
+      "publishProjects": [],
+      "installerWxs": [
+        "KeyboardManager.wxs"
+      ],
+      "installerComponentGroups": [
+        "KeyboardManagerComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "launcher",
+      "displayName": "PowerToys Run（快速启动）",
+      "moduleDllNames": [
+        "PowerToys.Launcher.dll"
+      ],
+      "moduleDir": "src/modules/launcher",
+      "publishProjects": [
+        "src/modules/launcher/PowerLauncher/PowerLauncher.csproj"
+      ],
+      "installerWxs": [
+        "Run.wxs"
+      ],
+      "installerComponentGroups": [
+        "RunComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "powerrename",
+      "displayName": "PowerRename（批量重命名）",
+      "moduleDllNames": [
+        "PowerToys.PowerRenameExt.dll"
+      ],
+      "moduleDir": "src/modules/powerrename",
+      "publishProjects": [],
+      "installerWxs": [
+        "PowerRename.wxs"
+      ],
+      "installerComponentGroups": [
+        "PowerRenameComponentGroup"
+      ],
+      "verified": true
+    },
+    {
+      "id": "ShortcutGuide",
+      "displayName": "Shortcut Guide（快捷键指南）",
+      "moduleDllNames": [
+        "PowerToys.ShortcutGuideModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/ShortcutGuide",
+      "publishProjects": [],
+      "installerWxs": [
+        "ShortcutGuide.wxs"
+      ],
+      "installerComponentGroups": [
+        "ShortcutGuideComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "colorPicker",
+      "displayName": "Color Picker（颜色选取器）",
+      "moduleDllNames": [
+        "PowerToys.ColorPicker.dll"
+      ],
+      "moduleDir": "src/modules/colorPicker",
+      "publishProjects": [],
+      "installerWxs": [
+        "ColorPicker.wxs"
+      ],
+      "installerComponentGroups": [
+        "ColorPickerComponentGroup"
+      ],
+      "verified": true
+    },
+    {
+      "id": "awake",
+      "displayName": "Awake（保持唤醒）",
+      "moduleDllNames": [
+        "PowerToys.AwakeModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/awake",
+      "publishProjects": [],
+      "installerWxs": [
+        "Awake.wxs"
+      ],
+      "installerComponentGroups": [
+        "AwakeComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "MouseUtils",
+      "displayName": "Mouse Utilities（鼠标实用工具：Find My Mouse / 鼠标荧光笔 / 鼠标跳转 / 十字准星 / 自动隐藏光标 / 光标环绕）",
+      "moduleDllNames": [
+        "PowerToys.FindMyMouse.dll",
+        "PowerToys.MouseHighlighter.dll",
+        "PowerToys.MouseJump.dll",
+        "PowerToys.MousePointerCrosshairs.dll",
+        "PowerToys.AutoHideCursor.dll",
+        "PowerToys.CursorWrap.dll"
+      ],
+      "moduleDir": "src/modules/MouseUtils",
+      "publishProjects": [],
+      "installerWxs": [],
+      "installerComponentGroups": [],
+      "verified": false,
+      "note": "上游把 6 个鼠标工具作为一组展示在设置界面，这里也作为一条记录整体开关。"
+    },
+    {
+      "id": "alwaysontop",
+      "displayName": "Always On Top（窗口置顶）",
+      "moduleDllNames": [
+        "PowerToys.AlwaysOnTopModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/alwaysontop",
+      "publishProjects": [],
+      "installerWxs": [],
+      "installerComponentGroups": [],
+      "verified": false
+    },
+    {
+      "id": "poweraccent",
+      "displayName": "Quick Accent（快速重音）",
+      "moduleDllNames": [
+        "PowerToys.PowerAccentModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/poweraccent",
+      "publishProjects": [],
+      "installerWxs": [],
+      "installerComponentGroups": [],
+      "verified": false
+    },
+    {
+      "id": "PowerOCR",
+      "displayName": "Text Extractor（文本提取器）",
+      "moduleDllNames": [
+        "PowerToys.PowerOCRModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/PowerOCR",
+      "publishProjects": [],
+      "installerWxs": [],
+      "installerComponentGroups": [],
+      "verified": false
+    },
+    {
+      "id": "AdvancedPaste",
+      "displayName": "Advanced Paste（高级粘贴）",
+      "moduleDllNames": [
+        "PowerToys.AdvancedPasteModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/AdvancedPaste",
+      "publishProjects": [],
+      "installerWxs": [
+        "AdvancedPaste.wxs"
+      ],
+      "installerComponentGroups": [
+        "AdvancedPasteComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "FileLocksmith",
+      "displayName": "File Locksmith（文件占用查看）",
+      "moduleDllNames": [
+        "PowerToys.FileLocksmithExt.dll"
+      ],
+      "moduleDir": "src/modules/FileLocksmith",
+      "publishProjects": [
+        "src/modules/FileLocksmith/FileLocksmithUI/FileLocksmithUI.csproj"
+      ],
+      "installerWxs": [
+        "FileLocksmith.wxs"
+      ],
+      "installerComponentGroups": [
+        "FileLocksmithComponentGroup"
+      ],
+      "verified": true
+    },
+    {
+      "id": "registrypreview",
+      "displayName": "Registry Preview（注册表预览）",
+      "moduleDllNames": [
+        "PowerToys.RegistryPreviewExt.dll"
+      ],
+      "moduleDir": "src/modules/registrypreview",
+      "publishProjects": [],
+      "installerWxs": [
+        "RegistryPreview.wxs"
+      ],
+      "installerComponentGroups": [
+        "RegistryPreviewComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "MeasureTool",
+      "displayName": "Screen Ruler（屏幕标尺）",
+      "moduleDllNames": [
+        "PowerToys.MeasureToolModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/MeasureTool",
+      "publishProjects": [],
+      "installerWxs": [],
+      "installerComponentGroups": [],
+      "verified": true,
+      "note": "上游没有 MeasureTool.wxs，其二进制由 BaseApplications / WinUI3Applications 的整体目录抓取自动带上。"
+    },
+    {
+      "id": "NewPlus",
+      "displayName": "New+（新建菜单增强）",
+      "moduleDllNames": [
+        "PowerToys.NewPlus.ShellExtension.dll"
+      ],
+      "moduleDir": "src/modules/NewPlus",
+      "publishProjects": [],
+      "installerWxs": [
+        "NewPlus.wxs"
+      ],
+      "installerComponentGroups": [
+        "NewPlusComponentGroup",
+        "NewPlusTemplatesComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "Hosts",
+      "displayName": "Hosts File Editor（Hosts 文件编辑器）",
+      "moduleDllNames": [
+        "PowerToys.HostsModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/Hosts",
+      "publishProjects": [],
+      "installerWxs": [
+        "Hosts.wxs"
+      ],
+      "installerComponentGroups": [
+        "HostsComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "peek",
+      "displayName": "Peek（速览）",
+      "moduleDllNames": [
+        "PowerToys.Peek.dll"
+      ],
+      "moduleDir": "src/modules/peek",
+      "publishProjects": [],
+      "installerWxs": [
+        "Peek.wxs"
+      ],
+      "installerComponentGroups": [
+        "PeekComponentGroup"
+      ],
+      "verified": true
+    },
+    {
+      "id": "EnvironmentVariables",
+      "displayName": "Environment Variables（环境变量编辑器）",
+      "moduleDllNames": [
+        "PowerToys.EnvironmentVariablesModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/EnvironmentVariables",
+      "publishProjects": [],
+      "installerWxs": [
+        "EnvironmentVariables.wxs"
+      ],
+      "installerComponentGroups": [
+        "EnvironmentVariablesComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "MouseWithoutBorders",
+      "displayName": "Mouse Without Borders（无界鼠标）",
+      "moduleDllNames": [
+        "PowerToys.MouseWithoutBordersModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/MouseWithoutBorders",
+      "publishProjects": [],
+      "installerWxs": [
+        "MouseWithoutBorders.wxs"
+      ],
+      "installerComponentGroups": [
+        "MouseWithoutBordersComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "CropAndLock",
+      "displayName": "Crop And Lock（裁剪与锁定）",
+      "moduleDllNames": [
+        "PowerToys.CropAndLockModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/CropAndLock",
+      "publishProjects": [],
+      "installerWxs": [],
+      "installerComponentGroups": [],
+      "verified": false
+    },
+    {
+      "id": "cmdNotFound",
+      "displayName": "Command Not Found（命令未找到提示）",
+      "moduleDllNames": [
+        "PowerToys.CmdNotFoundModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/cmdNotFound",
+      "publishProjects": [],
+      "installerWxs": [],
+      "installerComponentGroups": [],
+      "verified": false
+    },
+    {
+      "id": "Workspaces",
+      "displayName": "Workspaces（工作区）",
+      "moduleDllNames": [
+        "PowerToys.WorkspacesModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/Workspaces",
+      "publishProjects": [],
+      "installerWxs": [
+        "Workspaces.wxs"
+      ],
+      "installerComponentGroups": [
+        "WorkspacesComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "cmdpal",
+      "displayName": "Command Palette（命令面板）",
+      "moduleDllNames": [
+        "PowerToys.CmdPalModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/cmdpal",
+      "publishProjects": [],
+      "installerWxs": [
+        "CmdPal.wxs"
+      ],
+      "installerComponentGroups": [
+        "CmdPalComponentGroup"
+      ],
+      "verified": false,
+      "note": "启用它会自动保留 BaseApplications.wxs 里的 Microsoft.CommandPalette.Extensions.winmd 组件（补丁脚本会按选择决定），但 CmdPal.wxs 还依赖上游单独打包的 MSIX（WinUI3Apps\\CmdPal\\AppPackages\\...），精简流程暂不生成它。"
+    },
+    {
+      "id": "ZoomIt",
+      "displayName": "ZoomIt（屏幕缩放标注）",
+      "moduleDllNames": [
+        "PowerToys.ZoomItModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/ZoomIt",
+      "publishProjects": [],
+      "installerWxs": [],
+      "installerComponentGroups": [],
+      "verified": false
+    },
+    {
+      "id": "LightSwitch",
+      "displayName": "Light Switch（自动切换主题）",
+      "moduleDllNames": [
+        "PowerToys.LightSwitchModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/LightSwitch",
+      "publishProjects": [],
+      "installerWxs": [
+        "LightSwitch.wxs"
+      ],
+      "installerComponentGroups": [
+        "LightSwitchComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "powerdisplay",
+      "displayName": "Power Display（显示器控制）",
+      "moduleDllNames": [
+        "PowerToys.PowerDisplayModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/powerdisplay",
+      "publishProjects": [],
+      "installerWxs": [
+        "PowerDisplay.wxs"
+      ],
+      "installerComponentGroups": [
+        "PowerDisplayComponentGroup"
+      ],
+      "verified": false
+    },
+    {
+      "id": "GrabAndMove",
+      "displayName": "Grab And Move（拖拽移动窗口）",
+      "moduleDllNames": [
+        "PowerToys.GrabAndMoveModuleInterface.dll"
+      ],
+      "moduleDir": "src/modules/GrabAndMove",
+      "publishProjects": [],
+      "installerWxs": [],
+      "installerComponentGroups": [],
+      "verified": false
+    },
+    {
+      "id": "AltWindowCycle",
+      "displayName": "Alt+Tab 窗口切换增强（Alt Window Cycle）",
+      "moduleDllNames": [
+        "PowerToys.AltWindowCycle.dll"
+      ],
+      "moduleDir": "src/modules/AltWindowCycle",
+      "publishProjects": [],
+      "installerWxs": [],
+      "installerComponentGroups": [],
+      "verified": false
+    }
+  ]
+}
